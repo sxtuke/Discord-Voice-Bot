@@ -1,61 +1,19 @@
-/**
- * ╔══════════════════════════════════════════════════════════════╗
- * ║           GUARD BOT v2 — discord.js v14                      ║
- * ║   Components v2 · Mongoose · Rate-Limit · Select Menü        ║
- * ╚══════════════════════════════════════════════════════════════╝
- *
- *  YENİLİKLER (v2):
- *  ─ Güvenliler artık tamamen MongoDB'de saklanıyor (JSON yok)
- *  ─ !koruma → Components v2 Select Menu ile tüm korumaları aç/kapat
- *  ─ Güvenli kullanıcı olsa bile 1 dakikada 2+ işlem → KICK
- *  ─ Jail kaldırıldı → her ceza KICK
- *  ─ Güvenli kişi rate-limit ihlali loglanıyor
- *
- *  Gereksinimler:
- *    npm install discord.js mongoose
- */
-
-"use strict";
-
-const {
-  Client,
-  GatewayIntentBits,
-  Partials,
-  ContainerBuilder,
-  TextDisplayBuilder,
-  SeparatorBuilder,
-  SeparatorSpacingSize,
-  ActionRowBuilder,
-  StringSelectMenuBuilder,
-  StringSelectMenuOptionBuilder,
-  MessageFlags,
-  AuditLogEvent,
-  PermissionsBitField,
-  Events,
-} = require("discord.js");
-
+const { Client, GatewayIntentBits, Partials, ContainerBuilder, TextDisplayBuilder, SeparatorBuilder, SeparatorSpacingSize, ActionRowBuilder, StringSelectMenuBuilder, StringSelectMenuOptionBuilder, MessageFlags, AuditLogEvent, PermissionsBitField, Events} = require("discord.js");
 const mongoose = require("mongoose");
 const Settings = require("../Settings.json");
 
-// ═══════════════════════════════════════════════════════════════
-//  MONGOOSE MODELLERİ
-// ═══════════════════════════════════════════════════════════════
-
-// ── Güvenliler (whitelist) ──────────────────────────────────────
 const guvenliSchema = new mongoose.Schema({
   guildID:  { type: String, required: true },
-  hedefID:  { type: String, required: true },   // kullanıcı veya rol ID
+  hedefID:  { type: String, required: true },
   tur:      { type: String, enum: ["user", "role"], required: true },
   ekleyen:  { type: String },
   tarih:    { type: Date, default: Date.now },
 });
+
 guvenliSchema.index({ guildID: 1, hedefID: 1 }, { unique: true });
 const GuvenliModel = mongoose.model("Guvenli", guvenliSchema);
-
-// ── Koruma Ayarları ────────────────────────────────────────────
 const korumaSchema = new mongoose.Schema({
   guildID: { type: String, required: true, unique: true },
-  // Guard 1
   kickGuard:    { type: Boolean, default: true },
   banGuard:     { type: Boolean, default: true },
   banRemove:    { type: Boolean, default: true },
@@ -65,31 +23,25 @@ const korumaSchema = new mongoose.Schema({
   emojiDelete:  { type: Boolean, default: true },
   emojiCreate:  { type: Boolean, default: true },
   emojiUpdate:  { type: Boolean, default: true },
-  // Guard 2
   channelCreate: { type: Boolean, default: true },
   channelUpdate: { type: Boolean, default: true },
   channelDelete: { type: Boolean, default: true },
-  // Guard 3
   roleMemberUpdate: { type: Boolean, default: true },
   roleCreate:       { type: Boolean, default: true },
   roleUpdate:       { type: Boolean, default: true },
-  roleDelete:       { type: Boolean, default: false }, // varsayılan KAPALI
+  roleDelete:       { type: Boolean, default: false },
 });
 const KorumaModel = mongoose.model("Koruma", korumaSchema);
 
-// ── RoleGuard (rol yedek verisi) ────────────────────────────────
 const roleGuardSchema = new mongoose.Schema({
   guildID:          String,
   roleID:           String,
   members:          [String],
   channelOverwrites:[mongoose.Schema.Types.Mixed],
 });
-const RoleGuardModel = mongoose.model("RoleGuard", roleGuardSchema);
 
-// ─────────────────────────────────────────────────────────────────
-// KORUMA AYARLARI CACHE (her sunucu için hafızada tutulur)
-// ─────────────────────────────────────────────────────────────────
-const korumaCache = new Map(); // guildID → koruma objesi
+const RoleGuardModel = mongoose.model("RoleGuard", roleGuardSchema);
+const korumaCache = new Map();
 
 async function korumaGetir(guildID) {
   if (korumaCache.has(guildID)) return korumaCache.get(guildID);
@@ -112,10 +64,7 @@ async function korumaDegistir(guildID, alan, deger) {
   return doc;
 }
 
-// ─────────────────────────────────────────────────────────────────
-// GÜVENLİLER CACHE
-// ─────────────────────────────────────────────────────────────────
-const guvenliCache = new Map(); // guildID → Set<hedefID>
+const guvenliCache = new Map(); 
 
 async function guvenliCacheYukle(guildID) {
   const kayitlar = await GuvenliModel.find({ guildID }).lean();
@@ -137,17 +86,10 @@ async function guvenliKaldir(guildID, hedefID) {
   if (guvenliCache.has(guildID)) guvenliCache.get(guildID).delete(hedefID);
 }
 
-// ─────────────────────────────────────────────────────────────────
-// RATE-LİMİT TRACKER (1 dakika / 2 işlem)
-// ─────────────────────────────────────────────────────────────────
-// Map: `${guildID}:${executorID}` → [timestamp, timestamp, ...]
 const rateTracker = new Map();
-const RATE_LIMIT_SURE  = 60_000; // 1 dakika
-const RATE_LIMIT_LIMIT = 2;      // kaç işlemde kick
+const RATE_LIMIT_SURE  = 60_000;
+const RATE_LIMIT_LIMIT = 2;
 
-/**
- * İşlem kaydeder. Limitini aşarsa TRUE döner (kick gerekli).
- */
 function rateLimitKontrol(guildID, executorID) {
   const anahtar = `${guildID}:${executorID}`;
   const simdi   = Date.now();
@@ -157,7 +99,6 @@ function rateLimitKontrol(guildID, executorID) {
   return liste.length >= RATE_LIMIT_LIMIT;
 }
 
-// Bellek sızıntısına karşı 5 dakikada bir temizle
 setInterval(() => {
   const simdi = Date.now();
   for (const [key, liste] of rateTracker) {
@@ -167,11 +108,6 @@ setInterval(() => {
   }
 }, 300_000);
 
-// ═══════════════════════════════════════════════════════════════
-//  YARDIMCI FONKSİYONLAR
-// ═══════════════════════════════════════════════════════════════
-
-// ── Components v2 mesaj builder ──────────────────────────────
 function buildMessage(baslik, aciklama, renk = 0x2b2d31) {
   const container = new ContainerBuilder()
     .setAccentColor(renk)
@@ -184,7 +120,6 @@ function buildMessage(baslik, aciklama, renk = 0x2b2d31) {
   return { components: [container], flags: MessageFlags.IsComponentsV2 };
 }
 
-// ── Log gönder ────────────────────────────────────────────────
 async function log(client, logKanalID, guild, baslik, aciklama, renk) {
   try {
     const kanal = client.channels.cache.get(logKanalID)
@@ -195,7 +130,6 @@ async function log(client, logKanalID, guild, baslik, aciklama, renk) {
   } catch { /* sessizce geç */ }
 }
 
-// ── Kişi güvenli mi? (DB cache kullanır) ─────────────────────
 async function guvenliMi(guild, kisiID, botID) {
   if (!guild || !kisiID) return false;
   if (kisiID === botID)               return true;
@@ -208,10 +142,7 @@ async function guvenliMi(guild, kisiID, botID) {
   if (!guvenliCache.has(guild.id)) await guvenliCacheYukle(guild.id);
   const set = guvenliCache.get(guild.id) || new Set();
 
-  // Kullanıcı ID doğrudan listede mi?
   if (set.has(kisiID)) return true;
-
-  // Kullanıcının rollerinden biri listede mi?
   for (const rolID of uye.roles.cache.keys()) {
     if (set.has(rolID)) return true;
   }
@@ -219,17 +150,14 @@ async function guvenliMi(guild, kisiID, botID) {
   return false;
 }
 
-// ── Ceza ver: KICK ────────────────────────────────────────────
 async function cezalandir(guild, kisiID, sebep = "Guard Koruma Sistemi") {
   const uye = guild.members.cache.get(kisiID);
   if (!uye) return;
-  // Bot veya owner ise ceza atlanır (ekstra güvenlik)
   if (uye.id === guild.ownerId) return;
   if (uye.user.bot && uye.id === guild.members.me?.id) return;
   await uye.kick(sebep).catch(() => {});
 }
 
-// ── Audit log getir ───────────────────────────────────────────
 async function getAuditEntry(guild, tip, maxMs = 5000) {
   try {
     const logs  = await guild.fetchAuditLogs({ type: tip, limit: 1 });
@@ -242,10 +170,6 @@ async function getAuditEntry(guild, tip, maxMs = 5000) {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
-// ORTAK GUARD FONKSİYONU
-// Güvenli olsa bile rate-limit kontrolü yapar; değilse direk kick.
-// ─────────────────────────────────────────────────────────────────
 async function guardKontrol(opts) {
   const {
     client,
@@ -255,51 +179,37 @@ async function guardKontrol(opts) {
     logBaslik,
     logAciklama,
     logRenk,
-    aksiyonFn,   // () => Promise — ihlal aksiyonu (sil, geri al vs)
+    aksiyonFn,
     sebep,
   } = opts;
 
   const guvenli = await guvenliMi(guild, executorID, client.user.id);
-
-  // İhlal aksiyonunu her durumda uygula
   if (aksiyonFn) await aksiyonFn().catch(() => {});
 
   if (guvenli) {
-    // Güvenli kişi → rate-limit kontrolü
     const limitAsildi = rateLimitKontrol(guild.id, executorID);
-    if (!limitAsildi) return; // henüz limitini aşmadı, geç
+    if (!limitAsildi) return;
 
-    // Rate-limit aşıldı → kick + log
     await cezalandir(guild, executorID, `Guard Rate-Limit: 1 dakikada 2+ işlem`);
     await log(client, logKanal, guild,
-      "⚡ Güvenli Üye Rate-Limit Aştı",
+      "Güvenli Üye Rate-Limit Aştı",
       `<@${executorID}> (\`${executorID}\`) 1 dakika içinde **2+** işlem yaparak güvenli listesinden bağımsız şekilde **kick** yedi.\n> Sebep: ${sebep}`,
       0xff6b00
     );
     return;
   }
 
-  // Güvenli değil → direk kick + log
   await cezalandir(guild, executorID, sebep);
   await log(client, logKanal, guild, logBaslik, logAciklama, logRenk);
 }
 
-// ── Tehlikeli yetki listesi ───────────────────────────────────
 const TEHLIKELI_YETKILER = [
   PermissionsBitField.Flags.Administrator,
   PermissionsBitField.Flags.ManageRoles,
   PermissionsBitField.Flags.ManageChannels,
-  PermissionsBitField.Flags.ManageGuild,
-  PermissionsBitField.Flags.BanMembers,
-  PermissionsBitField.Flags.KickMembers,
-  PermissionsBitField.Flags.ManageNicknames,
-  PermissionsBitField.Flags.ManageEmojisAndStickers,
-  PermissionsBitField.Flags.ManageWebhooks,
+  PermissionsBitField.Flags.ManageGuild
 ];
 
-// ═══════════════════════════════════════════════════════════════
-//  CLIENT FABRİKASI
-// ═══════════════════════════════════════════════════════════════
 function createClient() {
   return new Client({
     intents: [
@@ -319,58 +229,43 @@ const Guard_1 = createClient();
 const Guard_2 = createClient();
 const Guard_3 = createClient();
 
-// ═══════════════════════════════════════════════════════════════
-//  MONGOOSE BAĞLANTISI
-// ═══════════════════════════════════════════════════════════════
 mongoose.connect(Settings.Mongoose.DatabaseUrl)
   .catch(err => console.error("[DB] Bağlantı hatası:", err));
 mongoose.connection.once("open", async () => {
   console.log("[DB] MongoDB bağlantısı başarılı.");
 });
 
-// ═══════════════════════════════════════════════════════════════
-//  KORUMA SELECT MENÜSÜ BUILDER
-// ═══════════════════════════════════════════════════════════════
 const KORUMA_TANIMLARI = [
-  // Guard 1
-  { alan: "kickGuard",        etiket: "👢 Kick Koruması",           aciklama: "İzinsiz kick atılmasını engeller" },
-  { alan: "banGuard",         etiket: "🔨 Ban Koruması",            aciklama: "İzinsiz ban atılmasını engeller" },
-  { alan: "banRemove",        etiket: "🔓 Ban Kaldırma Koruması",   aciklama: "İzinsiz ban kaldırılmasını engeller" },
-  { alan: "botGuard",         etiket: "🤖 Bot Ekleme Koruması",     aciklama: "İzinsiz bot eklenmesini engeller" },
-  { alan: "serverGuard",      etiket: "🏠 Sunucu Koruması",         aciklama: "Ad/ikon değişikliğini engeller" },
-  { alan: "webhookGuard",     etiket: "🪝 Webhook Koruması",        aciklama: "İzinsiz webhook açılmasını engeller" },
-  { alan: "emojiDelete",      etiket: "😮 Emoji Silme Koruması",    aciklama: "İzinsiz emoji silinmesini engeller" },
-  { alan: "emojiCreate",      etiket: "✨ Emoji Oluşturma Koruması",aciklama: "İzinsiz emoji yüklenmesini engeller" },
-  { alan: "emojiUpdate",      etiket: "🔄 Emoji Güncelleme Koruması",aciklama: "İzinsiz emoji güncellenmesini engeller" },
-  // Guard 2
-  { alan: "channelCreate",    etiket: "📢 Kanal Oluşturma Koruması",aciklama: "İzinsiz kanal açılmasını engeller" },
-  { alan: "channelUpdate",    etiket: "✏️ Kanal Güncelleme Koruması",aciklama: "İzinsiz kanal düzenlenmesini engeller" },
-  { alan: "channelDelete",    etiket: "🗑️ Kanal Silme Koruması",    aciklama: "İzinsiz kanal silinmesini engeller" },
-  // Guard 3
-  { alan: "roleMemberUpdate", etiket: "🎖️ Sağ Tık Rol Koruması",   aciklama: "Yetkili rol verilmesini engeller" },
-  { alan: "roleCreate",       etiket: "🆕 Rol Oluşturma Koruması",  aciklama: "İzinsiz rol açılmasını engeller" },
-  { alan: "roleUpdate",       etiket: "🔧 Rol Güncelleme Koruması", aciklama: "İzinsiz rol düzenlenmesini engeller" },
-  { alan: "roleDelete",       etiket: "❌ Rol Silme Koruması",      aciklama: "İzinsiz rol silinmesini engeller (varsayılan KAPALI)" },
+  { alan: "kickGuard",        etiket: "Kick Koruması",           aciklama: "İzinsiz kick atılmasını engeller" },
+  { alan: "banGuard",         etiket: "Ban Koruması",            aciklama: "İzinsiz ban atılmasını engeller" },
+  { alan: "banRemove",        etiket: "Ban Kaldırma Koruması",   aciklama: "İzinsiz ban kaldırılmasını engeller" },
+  { alan: "botGuard",         etiket: "Bot Ekleme Koruması",     aciklama: "İzinsiz bot eklenmesini engeller" },
+  { alan: "serverGuard",      etiket: "Sunucu Koruması",         aciklama: "Ad/ikon değişikliğini engeller" },
+  { alan: "webhookGuard",     etiket: "Webhook Koruması",        aciklama: "İzinsiz webhook açılmasını engeller" },
+  { alan: "emojiDelete",      etiket: "Emoji Silme Koruması",    aciklama: "İzinsiz emoji silinmesini engeller" },
+  { alan: "emojiCreate",      etiket: "Emoji Oluşturma Koruması",aciklama: "İzinsiz emoji yüklenmesini engeller" },
+  { alan: "emojiUpdate",      etiket: "Emoji Güncelleme Koruması",aciklama: "İzinsiz emoji güncellenmesini engeller" },
+  { alan: "channelCreate",    etiket: "Kanal Oluşturma Koruması",aciklama: "İzinsiz kanal açılmasını engeller" },
+  { alan: "channelUpdate",    etiket: "Kanal Güncelleme Koruması",aciklama: "İzinsiz kanal düzenlenmesini engeller" },
+  { alan: "channelDelete",    etiket: "Kanal Silme Koruması",    aciklama: "İzinsiz kanal silinmesini engeller" },
+  { alan: "roleMemberUpdate", etiket: "Sağ Tık Rol Koruması",   aciklama: "Yetkili rol verilmesini engeller" },
+  { alan: "roleCreate",       etiket: "Rol Oluşturma Koruması",  aciklama: "İzinsiz rol açılmasını engeller" },
+  { alan: "roleUpdate",       etiket: "Rol Güncelleme Koruması", aciklama: "İzinsiz rol düzenlenmesini engeller" },
+  { alan: "roleDelete",       etiket: "Rol Silme Koruması",      aciklama: "İzinsiz rol silinmesini engeller (varsayılan KAPALI)" },
 ];
 
-/**
- * Mevcut koruma durumunu göstererek select menü mesajı oluşturur.
- * Açık olanların yanında ✅, kapalı olanlarda ❌ gösterir.
- */
+
 async function korumaMenusuGonder(message, guildID) {
   const koruma = await korumaGetir(guildID);
-
-  // Durum metni
   const satirlar = KORUMA_TANIMLARI.map(t => {
-    const durum = koruma[t.alan] ? "✅ Açık" : "❌ Kapalı";
+    const durum = koruma[t.alan] ? "Açık" : "Kapalı";
     return `${t.etiket} — **${durum}**`;
   }).join("\n");
 
-  // Select menu options (max 25)
   const options = KORUMA_TANIMLARI.map(t => {
     const acik = koruma[t.alan];
     return new StringSelectMenuOptionBuilder()
-      .setLabel(t.etiket.replace(/^[^ ]+ /, "")) // emojisiz label
+      .setLabel(t.etiket.replace(/^[^ ]+ /, ""))
       .setEmoji(t.etiket.split(" ")[0])
       .setValue(t.alan)
       .setDescription(acik ? "Şu an AÇIK — tıkla KAPAT" : "Şu an KAPALI — tıkla AÇ")
@@ -385,8 +280,6 @@ async function korumaMenusuGonder(message, guildID) {
     .setMaxValues(1);
 
   const row = new ActionRowBuilder().addComponents(menu);
-
-  // Container içinde tablo + select menu
   const container = new ContainerBuilder()
     .setAccentColor(0x5865f2)
     .addTextDisplayComponents(new TextDisplayBuilder().setContent("### 🛡️ Koruma Kontrol Paneli"))
@@ -401,18 +294,12 @@ async function korumaMenusuGonder(message, guildID) {
   });
 }
 
-// ═══════════════════════════════════════════════════════════════
-//  GUARD 1 — Server Guard + Komutlar
-// ═══════════════════════════════════════════════════════════════
-
 Guard_1.on("ready", async () => {
   Guard_1.user.setPresence({ activities: [{ name: Settings.Server.Status }], status: "dnd" });
   console.log(`[GUARD 1] ${Guard_1.user.tag} olarak giriş yapıldı.`);
-  // Güvenli cache'i önceden yükle
   if (Settings.Server.GuildID) await guvenliCacheYukle(Settings.Server.GuildID).catch(() => {});
 });
 
-// ── Komutlar ─────────────────────────────────────────────────
 Guard_1.on(Events.MessageCreate, async message => {
   if (message.author.bot || !message.guild) return;
   if (!message.content.toLowerCase().startsWith(Settings.Prefix.Guard_1P)) return;
@@ -425,7 +312,6 @@ Guard_1.on(Events.MessageCreate, async message => {
   const command = args.shift().toLowerCase();
   const guildID = message.guild.id;
 
-  // ── eval ─────────────────────────────────────────────
   if (command === "eval" && message.author.id === Settings.Server.OwnerID) {
     if (!args.length) return;
     const code = args.join(" ");
@@ -444,12 +330,10 @@ Guard_1.on(Events.MessageCreate, async message => {
     return;
   }
 
-  // ── koruma (Select Menu) ──────────────────────────────
   if (command === "koruma") {
     return korumaMenusuGonder(message, guildID);
   }
 
-  // ── güvenliler / liste ────────────────────────────────
   if (command === "güvenliler" || command === "liste") {
     const kayitlar = await GuvenliModel.find({ guildID }).lean();
     if (!kayitlar.length) {
@@ -464,7 +348,6 @@ Guard_1.on(Events.MessageCreate, async message => {
     return message.channel.send(buildMessage("🛡️ Güvenli Liste (White List)", satirlar, 0x5865f2));
   }
 
-  // ── safe / güvenli ───────────────────────────────────
   if (command === "safe" || command === "güvenli") {
     const rol = message.mentions.roles.first()
       || message.guild.roles.cache.get(args[0])
@@ -474,7 +357,7 @@ Guard_1.on(Events.MessageCreate, async message => {
     const hedef = rol || uye;
 
     if (!hedef) return message.channel.send(
-      buildMessage("⚠️ Hata", "Güvenli listeye eklemek/kaldırmak için `@Kullanıcı/ID` belirtmelisin.", 0xffa500)
+      buildMessage("Hata", "Güvenli listeye eklemek/kaldırmak için `@Kullanıcı/ID` belirtmelisin.", 0xffa500)
     );
 
     const hedefID = hedef.id;
@@ -484,23 +367,21 @@ Guard_1.on(Events.MessageCreate, async message => {
     if (mevcut) {
       await guvenliKaldir(guildID, hedefID);
       return message.channel.send(
-        buildMessage("✅ Güvenli Listeden Çıkarıldı", `${hedef} → ${message.author} tarafından **çıkarıldı**.`, 0xed4245)
+        buildMessage("Güvenli Listeden Çıkarıldı", `${hedef} → ${message.author} tarafından **çıkarıldı**.`, 0xed4245)
       );
     } else {
       await guvenliEkle(guildID, hedefID, tur, message.author.id);
       return message.channel.send(
-        buildMessage("✅ Güvenli Listeye Eklendi", `${hedef} → ${message.author} tarafından **eklendi**.`, 0x57f287)
+        buildMessage("Güvenli Listeye Eklendi", `${hedef} → ${message.author} tarafından **eklendi**.`, 0x57f287)
       );
     }
   }
 });
 
-// ── Select Menu Etkileşimi (Guard_1 üzerinden dinleniyor) ────
 Guard_1.on(Events.InteractionCreate, async interaction => {
   if (!interaction.isStringSelectMenu()) return;
   if (!interaction.customId.startsWith("koruma_toggle:")) return;
 
-  // Sadece owner kullanabilir
   if (
     interaction.user.id !== Settings.Server.OwnerID &&
     interaction.user.id !== interaction.guild.ownerId
@@ -520,7 +401,7 @@ Guard_1.on(Events.InteractionCreate, async interaction => {
   const yeniDeger = !koruma[alan];
   await korumaDegistir(guildID, alan, yeniDeger);
 
-  const durum = yeniDeger ? "✅ AÇıldı" : "❌ KAPATıldı";
+  const durum = yeniDeger ? "✅ Acik" : "Kapali";
   const renk  = yeniDeger ? 0x57f287 : 0xed4245;
 
   await interaction.reply({
@@ -528,10 +409,9 @@ Guard_1.on(Events.InteractionCreate, async interaction => {
     ephemeral: true,
   });
 
-  // Mesajı güncelle (durumları yenile)
   const korumaSonrasi = await korumaGetir(guildID);
   const satirlar = KORUMA_TANIMLARI.map(t => {
-    const d = korumaSonrasi[t.alan] ? "✅ Açık" : "❌ Kapalı";
+    const d = korumaSonrasi[t.alan] ? "Açık" : "Kapalı";
     return `${t.etiket} — **${d}**`;
   }).join("\n");
 
@@ -568,9 +448,6 @@ Guard_1.on(Events.InteractionCreate, async interaction => {
   }).catch(() => {});
 });
 
-// ── Server Guard Eventleri ───────────────────────────────────
-
-// Kick
 Guard_1.on("guildMemberRemove", async member => {
   const koruma = await korumaGetir(member.guild.id);
   if (!koruma.kickGuard) return;
@@ -588,7 +465,6 @@ Guard_1.on("guildMemberRemove", async member => {
   });
 });
 
-// Ban Ekleme
 Guard_1.on("guildBanAdd", async ban => {
   const koruma = await korumaGetir(ban.guild.id);
   if (!koruma.banGuard) return;
@@ -607,7 +483,6 @@ Guard_1.on("guildBanAdd", async ban => {
   });
 });
 
-// Bot Ekleme
 Guard_1.on("guildMemberAdd", async member => {
   const koruma = await korumaGetir(member.guild.id);
   if (!koruma.botGuard || !member.user.bot) return;
@@ -626,9 +501,8 @@ Guard_1.on("guildMemberAdd", async member => {
   });
 });
 
-// Sunucu Güncelleme
+
 Guard_1.on("guildUpdate", async (oldGuild, newGuild) => {
-  // Vanity URL koruması (her zaman aktif)
   if (oldGuild.vanityURLCode !== newGuild.vanityURLCode) {
     const entry = await getAuditEntry(newGuild, AuditLogEvent.GuildUpdate, 5000);
     if (entry && entry.executor.id !== Guard_1.user.id) {
@@ -651,7 +525,6 @@ Guard_1.on("guildUpdate", async (oldGuild, newGuild) => {
     }
   }
 
-  // Genel sunucu koruması
   const koruma = await korumaGetir(newGuild.id);
   if (!koruma.serverGuard) return;
   const entry = await getAuditEntry(newGuild, AuditLogEvent.GuildUpdate, 3000);
@@ -673,7 +546,6 @@ Guard_1.on("guildUpdate", async (oldGuild, newGuild) => {
   });
 });
 
-// Webhook
 Guard_1.on("webhookUpdate", async channel => {
   const koruma = await korumaGetir(channel.guild.id);
   if (!koruma.webhookGuard) return;
@@ -696,7 +568,6 @@ Guard_1.on("webhookUpdate", async channel => {
   });
 });
 
-// Emoji Sil
 Guard_1.on("emojiDelete", async emoji => {
   const koruma = await korumaGetir(emoji.guild.id);
   if (!koruma.emojiDelete) return;
@@ -715,7 +586,6 @@ Guard_1.on("emojiDelete", async emoji => {
   });
 });
 
-// Emoji Oluştur
 Guard_1.on("emojiCreate", async emoji => {
   const koruma = await korumaGetir(emoji.guild.id);
   if (!koruma.emojiCreate) return;
@@ -734,7 +604,6 @@ Guard_1.on("emojiCreate", async emoji => {
   });
 });
 
-// Emoji Güncelle
 Guard_1.on("emojiUpdate", async (oldEmoji, newEmoji) => {
   if (oldEmoji.name === newEmoji.name) return;
   const koruma = await korumaGetir(oldEmoji.guild.id);
@@ -754,7 +623,6 @@ Guard_1.on("emojiUpdate", async (oldEmoji, newEmoji) => {
   });
 });
 
-// Ban Kaldırma
 Guard_1.on("guildBanRemove", async ban => {
   const koruma = await korumaGetir(ban.guild.id);
   if (!koruma.banRemove) return;
@@ -772,10 +640,6 @@ Guard_1.on("guildBanRemove", async ban => {
     sebep: "Guard | İzinsiz Ban Kaldırma",
   });
 });
-
-// ═══════════════════════════════════════════════════════════════
-//  GUARD 2 — Channel Guard
-// ═══════════════════════════════════════════════════════════════
 
 Guard_2.on("ready", () => {
   Guard_2.user.setPresence({ activities: [{ name: Settings.Server.Status }], status: "dnd" });
@@ -808,7 +672,6 @@ Guard_2.on(Events.MessageCreate, async message => {
   }
 });
 
-// Kanal Oluşturma
 Guard_2.on("channelCreate", async channel => {
   const koruma = await korumaGetir(channel.guild.id);
   if (!koruma.channelCreate) return;
@@ -827,7 +690,6 @@ Guard_2.on("channelCreate", async channel => {
   });
 });
 
-// Kanal Güncelleme
 Guard_2.on("channelUpdate", async (oldChannel, newChannel) => {
   const koruma = await korumaGetir(newChannel.guild.id);
   if (!koruma.channelUpdate) return;
@@ -863,7 +725,6 @@ Guard_2.on("channelUpdate", async (oldChannel, newChannel) => {
   });
 });
 
-// Kanal Silme
 Guard_2.on("channelDelete", async channel => {
   const koruma = await korumaGetir(channel.guild.id);
   if (!koruma.channelDelete) return;
@@ -892,7 +753,6 @@ Guard_2.on("channelDelete", async channel => {
   });
 });
 
-// Vanity URL (Guard 2)
 Guard_2.on("guildUpdate", async (oldGuild, newGuild) => {
   if (oldGuild.vanityURLCode === newGuild.vanityURLCode) return;
   const entry = await getAuditEntry(newGuild, AuditLogEvent.GuildUpdate, 5000);
@@ -913,10 +773,6 @@ Guard_2.on("guildUpdate", async (oldGuild, newGuild) => {
     sebep: "Guard | Vanity URL Değiştirme",
   });
 });
-
-// ═══════════════════════════════════════════════════════════════
-//  GUARD 3 — Role Guard
-// ═══════════════════════════════════════════════════════════════
 
 Guard_3.on("ready", () => {
   Guard_3.user.setPresence({ activities: [{ name: Settings.Server.Status }], status: "dnd" });
@@ -949,7 +805,6 @@ Guard_3.on(Events.MessageCreate, async message => {
   }
 });
 
-// Sağ Tık Rol Verme
 Guard_3.on("guildMemberUpdate", async (oldMember, newMember) => {
   const koruma = await korumaGetir(newMember.guild.id);
   if (!koruma.roleMemberUpdate) return;
@@ -973,7 +828,6 @@ Guard_3.on("guildMemberUpdate", async (oldMember, newMember) => {
   });
 });
 
-// Rol Oluşturma
 Guard_3.on("roleCreate", async role => {
   const koruma = await korumaGetir(role.guild.id);
   if (!koruma.roleCreate) return;
@@ -992,7 +846,7 @@ Guard_3.on("roleCreate", async role => {
   });
 });
 
-// Rol Güncelleme
+
 Guard_3.on("roleUpdate", async (oldRole, newRole) => {
   const koruma = await korumaGetir(newRole.guild.id);
   if (!koruma.roleUpdate) return;
@@ -1028,7 +882,6 @@ Guard_3.on("roleUpdate", async (oldRole, newRole) => {
   });
 });
 
-// Rol Silme (varsayılan KAPALI — !koruma menüsünden açılabilir)
 Guard_3.on("roleDelete", async role => {
   const koruma = await korumaGetir(role.guild.id);
   if (!koruma.roleDelete) return;
@@ -1074,14 +927,12 @@ Guard_3.on("roleDelete", async role => {
   });
 });
 
-// ═══════════════════════════════════════════════════════════════
-//  HATA YÖNETİMİ
-// ═══════════════════════════════════════════════════════════════
 function hataYonetimi(client, ad) {
   client.on("warn",       m => console.warn(`[${ad}][WARN] ${m}`));
   client.on("error",      e => console.error(`[${ad}][ERROR] ${e}`));
   client.on("shardError", e => console.error(`[${ad}][SHARD] ${e}`));
 }
+
 hataYonetimi(Guard_1, "GUARD 1");
 hataYonetimi(Guard_2, "GUARD 2");
 hataYonetimi(Guard_3, "GUARD 3");
@@ -1089,53 +940,6 @@ hataYonetimi(Guard_3, "GUARD 3");
 process.on("uncaughtException",  err => console.error("[PROCESS][ERROR]",  err));
 process.on("unhandledRejection", err => console.error("[PROCESS][REJECT]", err));
 
-// ═══════════════════════════════════════════════════════════════
-//  GİRİŞ
-// ═══════════════════════════════════════════════════════════════
-Guard_1.login(Settings.Token.Guard_1)
-  .then(() => console.log("[GUARD 1] Başarıyla giriş yapıldı!"))
-  .catch(err => console.error("[GUARD 1] Giriş hatası:", err));
-Guard_2.login(Settings.Token.Guard_2)
-  .then(() => console.log("[GUARD 2] Başarıyla giriş yapıldı!"))
-  .catch(err => console.error("[GUARD 2] Giriş hatası:", err));
-Guard_3.login(Settings.Token.Guard_3)
-  .then(() => console.log("[GUARD 3] Başarıyla giriş yapıldı!"))
-  .catch(err => console.error("[GUARD 3] Giriş hatası:", err));
-
-/*
- * ─────────────────────────────────────────────────────────────────
- *  NOTLAR
- * ─────────────────────────────────────────────────────────────────
- *
- *  1) Güvenliler.json ve Guard.json artık kullanılmıyor.
- *     Her şey MongoDB'de saklanıyor.
- *
- *  2) Komutlar:
- *     !koruma          → Select Menu ile koruma aç/kapat
- *     !güvenliler      → DB'deki güvenli listesini göster
- *     !safe @x         → Kullanıcı veya rolü güvenli listeye ekle/kaldır
- *     !güvenli @x      → safe ile aynı
- *     !liste           → güvenliler ile aynı
- *
- *  3) Rate-limit: Güvenli kişi dahil herkes 1 dakikada 2+ işlem
- *     yaparsa KICK yiyor. Jail yok — direkt kick.
- *
- *  4) roleDelete koruması varsayılan KAPALI.
- *     !koruma → "Rol Silme Koruması" seçerek açabilirsin.
- *
- *  5) Settings.json örnek:
- *  {
- *    "Prefix": { "Guard_1P": "!", "Guard_2P": "!!", "Guard_3P": "!!!" },
- *    "Server": {
- *      "OwnerID": "123456789",
- *      "GuildID": "987654321",
- *      "Status":  "Sunucuyu Koruyorum",
- *      "VanityURL": "sunucuadresi"
- *    },
- *    "Token": { "Guard_1": "TOKEN1", "Guard_2": "TOKEN2", "Guard_3": "TOKEN3" },
- *    "Log":   { "Guard_Log1": "KANAL_ID_1", "Guard_Log2": "KANAL_ID_2", "Guard_Log3": "KANAL_ID_3" },
- *    "Roles": { "BoosterRole": "ROL_ID" },
- *    "Mongoose": { "DatabaseUrl": "mongodb://..." }
- *  }
- * ─────────────────────────────────────────────────────────────────
- */
+Guard_1.login(Settings.Token.Guard_1).then(() => console.log("[GUARD 1] Başarıyla giriş yapıldı!")).catch(err => console.error("[GUARD 1] Giriş hatası:", err));
+Guard_2.login(Settings.Token.Guard_2).then(() => console.log("[GUARD 2] Başarıyla giriş yapıldı!")).catch(err => console.error("[GUARD 2] Giriş hatası:", err));
+Guard_3.login(Settings.Token.Guard_3).then(() => console.log("[GUARD 3] Başarıyla giriş yapıldı!")).catch(err => console.error("[GUARD 3] Giriş hatası:", err));
